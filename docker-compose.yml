@@ -1,0 +1,45 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: bn_monitor
+      POSTGRES_USER: bn_monitor
+      POSTGRES_PASSWORD: bn_monitor
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bn_monitor -d bn_monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bn_monitor:bn_monitor@timescaledb:5432/bn_monitor
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && bn-monitor run"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bn-monitor", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  timescale-data:
