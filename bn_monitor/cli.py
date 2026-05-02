@@ -154,8 +154,8 @@ async def _healthcheck(settings) -> None:
                     text(
                         """
                         SELECT hypertable_name
-                        FROM _timescaledb_catalog.hypertable
-                        WHERE schema_name = 'public'
+                        FROM timescaledb_information.hypertables
+                        WHERE hypertable_schema = 'public'
                           AND hypertable_name IN :hypertables
                         """
                     ).bindparams(bindparam("hypertables", expanding=True)),

@@ -17,7 +17,7 @@ def test_healthcheck_command_checks_hypertables() -> None:
     from bn_monitor.cli import _healthcheck
 
     source = inspect.getsource(_healthcheck)
-    assert "_timescaledb_catalog.hypertable" in source
+    assert "timescaledb_information.hypertables" in source
     assert "missing hypertables" in source
     assert "alembic_version" in source
     assert "0002_contract_type_symbols" in source
