@@ -95,6 +95,35 @@ def test_alert_summary_command_exists() -> None:
     assert "--severity" in source
 
 
+def test_retention_command_exists_and_uses_configured_days() -> None:
+    from bn_monitor.cli import _config_payload, main
+    from bn_monitor.config import Settings
+
+    source = inspect.getsource(main)
+    assert "retention-run" in source
+    assert "_retention_run(settings)" in source
+    payload = _config_payload(Settings())
+    assert payload["thresholds"]["data_retention_days"] == 30
+
+
+def test_retention_tables_are_limited_to_time_series_data() -> None:
+    from bn_monitor.cli import RETENTION_TABLES, _retention_run
+
+    expected = {
+        "futures_kline_1m",
+        "futures_open_interest",
+        "futures_mark_price",
+        "liquidation_snapshots",
+        "indicator_snapshot_1m",
+    }
+    assert expected <= set(RETENTION_TABLES)
+    assert "symbols" not in RETENTION_TABLES
+    assert "alert_cooldowns" not in RETENTION_TABLES
+    source = inspect.getsource(_retention_run)
+    assert "DELETE FROM {table} WHERE ts < :cutoff" in source
+    assert '"cutoff": cutoff' in source
+
+
 def test_config_dump_redacts_secrets_and_exposes_thresholds() -> None:
     from bn_monitor.cli import _config_payload
     from bn_monitor.config import Settings
@@ -110,7 +139,9 @@ def test_config_dump_redacts_secrets_and_exposes_thresholds() -> None:
     assert "discord.example" not in str(payload)
     assert payload["thresholds"]["price_threshold_bps"] == 35
     assert payload["thresholds"]["flat_oi_volume_percentile_threshold"] == 0.9
+    assert payload["thresholds"]["data_retention_days"] == 30
     assert payload["intervals"]["rest_max_requests_per_second"] == 15
+    assert payload["intervals"]["open_interest_poll_interval_seconds"] == 300
     assert payload["intervals"]["indicator_poll_interval_seconds"] == 5
 
 
@@ -153,6 +184,8 @@ def test_rest_poller_backfills_recent_closed_klines() -> None:
     assert hasattr(BinanceRestClient, "klines_1m")
     source = inspect.getsource(poll_rest_forever)
     assert "poll_symbol_public_context" in source
+    assert "open_interest_poll_interval_seconds" in source
+    assert "poll_open_interest" in source
     assert "binance_rest_symbol_poll_failed" in source
     assert "symbols_payload = await rest.exchange_info()" in source
     symbol_source = inspect.getsource(poll_symbol_public_context)
@@ -172,6 +205,7 @@ def test_env_example_covers_runtime_settings() -> None:
         "EXCLUDED_SYMBOLS",
         "ALERT_MODE",
         "DISCORD_WEBHOOK_URL",
+        "DATA_RETENTION_DAYS",
         "KLINE_GAP_MAX_RATIO",
         "KLINE_MAX_STALENESS_MINUTES",
         "MARKET_DATA_MAX_STALENESS_MINUTES",
@@ -182,6 +216,7 @@ def test_env_example_covers_runtime_settings() -> None:
         "DISCORD_REFILL_PER_SECOND",
         "DIGEST_TRIGGER_COUNT",
         "REST_MAX_REQUESTS_PER_SECOND",
+        "OPEN_INTEREST_POLL_INTERVAL_SECONDS",
         "WS_KLINE_STREAM_CHUNK_SIZE",
         "FLAT_OI_VOLUME_PERCENTILE_THRESHOLD",
         "FLAT_OI_MIN_OI_CHANGE_BPS",

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     binance_rest_url: str = "https://fapi.binance.com"
     binance_ws_url: str = "wss://fstream.binance.com"
     universe_mode: Literal["configured", "all_usdt_perpetual"] = "configured"
+    min_24h_quote_volume_usd: int = 5_000_000
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "BTCUSDT",
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     alert_mode: Literal["shadow", "live"] = "shadow"
     discord_webhook_url: str | None = None
     log_level: str = "INFO"
+    data_retention_days: int = 30
     kline_gap_max_ratio: float = 0.001
     kline_max_staleness_minutes: int = 3
     market_data_max_staleness_minutes: int = 5
@@ -55,6 +57,7 @@ class Settings(BaseSettings):
     max_live_alerts_per_cycle: int = 5
     rest_poll_interval_seconds: int = 60
     rest_max_requests_per_second: float = 15
+    open_interest_poll_interval_seconds: int = 300
     indicator_poll_interval_seconds: int = 5
     ws_flush_interval_seconds: float = 0.2
     ws_kline_stream_chunk_size: int = 300

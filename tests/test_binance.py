@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
 import pytest
 
-from bn_monitor.binance import BinanceRestClient, BinanceStream, select_universe_symbols
+from bn_monitor.binance import BinanceRestClient, BinanceStream, poll_symbol_public_context, select_universe_symbols
 from bn_monitor.binance import closed_kline_from_ws, liquidation_from_ws
 
 
@@ -87,6 +88,42 @@ async def test_rest_client_retries_after_429(monkeypatch: pytest.MonkeyPatch) ->
     assert row["open_interest"] == Decimal("10")
     assert calls == 2
     assert Decimal(str(sleeps[0])) == Decimal("0.25")
+
+
+@pytest.mark.asyncio
+async def test_open_interest_history_maps_rows() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/futures/data/openInterestHist"
+        assert request.url.params["symbol"] == "BTCUSDT"
+        assert request.url.params["period"] == "5m"
+        assert request.url.params["limit"] == "2"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "symbol": "BTCUSDT",
+                    "sumOpenInterest": "10.5",
+                    "sumOpenInterestValue": "1050.25",
+                    "timestamp": 1710000000000,
+                }
+            ],
+            request=request,
+        )
+
+    client = BinanceRestClient(
+        "https://example.test",
+        httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://example.test"),
+        min_interval_seconds=0,
+    )
+    try:
+        rows = await client.open_interest_history("BTCUSDT", limit=2)
+    finally:
+        await client.close()
+
+    assert rows[0]["ts"] == datetime.fromtimestamp(1710000000, tz=UTC)
+    assert rows[0]["symbol"] == "BTCUSDT"
+    assert rows[0]["open_interest"] == Decimal("10.5")
+    assert rows[0]["open_interest_value"] == Decimal("1050.25")
 
 
 @pytest.mark.asyncio
@@ -217,6 +254,35 @@ async def test_exchange_info_filters_to_trading_usdt_perpetuals() -> None:
     assert [row["symbol"] for row in rows] == ["BTCUSDT"]
 
 
+@pytest.mark.asyncio
+async def test_rest_client_maps_24h_quote_volumes() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/ticker/24hr"
+        return httpx.Response(
+            200,
+            json=[
+                {"symbol": "BTCUSDT", "quoteVolume": "5000000"},
+                {"symbol": "ETHUSDT", "quoteVolume": "4999999.99"},
+            ],
+            request=request,
+        )
+
+    client = BinanceRestClient(
+        "https://example.test",
+        httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://example.test"),
+        min_interval_seconds=0,
+    )
+    try:
+        quote_volumes = await client.quote_volumes_24h()
+    finally:
+        await client.close()
+
+    assert quote_volumes == {
+        "BTCUSDT": Decimal("5000000"),
+        "ETHUSDT": Decimal("4999999.99"),
+    }
+
+
 def test_ws_streams_use_market_route_and_chunk_klines() -> None:
     stream = BinanceStream("wss://fstream.binance.com", ["BTCUSDT", "ETHUSDT", "SOLUSDT"], 2)
     urls = stream.stream_urls()
@@ -232,7 +298,54 @@ def test_select_universe_symbols_respects_mode_and_exclusions() -> None:
         {"symbol": "ETHUSDT", "is_active": True},
     ]
     assert select_universe_symbols(rows, ["SOLUSDT"], "configured", ["SOLUSDT"]) == []
-    assert select_universe_symbols(rows, ["SOLUSDT"], "all_usdt_perpetual", ["ETHUSDT"]) == ["BTCUSDT"]
+    assert select_universe_symbols(
+        rows,
+        ["SOLUSDT"],
+        "all_usdt_perpetual",
+        ["ETHUSDT"],
+        {"BTCUSDT": Decimal("5000000"), "ETHUSDT": Decimal("5000000")},
+        5_000_000,
+    ) == ["BTCUSDT"]
+
+
+def test_select_universe_symbols_gates_all_mode_by_24h_quote_volume() -> None:
+    rows = [
+        {"symbol": "BTCUSDT", "is_active": True},
+        {"symbol": "ETHUSDT", "is_active": True},
+        {"symbol": "DOGEUSDT", "is_active": True},
+    ]
+    quote_volumes = {
+        "BTCUSDT": Decimal("5000000"),
+        "ETHUSDT": Decimal("4999999.99"),
+    }
+
+    assert select_universe_symbols(
+        rows,
+        ["DOGEUSDT"],
+        "all_usdt_perpetual",
+        [],
+        quote_volumes,
+        5_000_000,
+    ) == ["BTCUSDT"]
+
+
+def test_select_universe_symbols_configured_mode_ignores_24h_quote_volume_gate() -> None:
+    rows = [
+        {"symbol": "BTCUSDT", "is_active": True},
+        {"symbol": "ETHUSDT", "is_active": True},
+    ]
+    quote_volumes = {
+        "BTCUSDT": Decimal("1"),
+    }
+
+    assert select_universe_symbols(
+        rows,
+        ["BTCUSDT", "ETHUSDT"],
+        "configured",
+        [],
+        quote_volumes,
+        5_000_000,
+    ) == ["BTCUSDT", "ETHUSDT"]
 
 
 @pytest.mark.asyncio
@@ -322,3 +435,200 @@ async def test_rest_klines_maps_only_closed_rows() -> None:
     assert rows[0]["symbol"] == "BTCUSDT"
     assert rows[0]["quote_volume"] == Decimal("15")
     assert rows[0]["taker_buy_quote_volume"] == Decimal("6")
+
+
+@pytest.mark.asyncio
+async def test_poll_symbol_public_context_prefers_open_interest_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, list[dict[str, object]] | dict[str, object]] = {}
+
+    class Rest:
+        current_called = False
+
+        async def premium_index(self, symbol: str) -> dict[str, object]:
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "mark_price": Decimal("100"),
+            }
+
+        async def open_interest_history(
+            self, symbol: str, period: str = "5m", limit: int = 30
+        ) -> list[dict[str, object]]:
+            assert period == "5m"
+            assert limit == 1
+            return [
+                {
+                    "ts": datetime.fromtimestamp(1710000000, tz=UTC),
+                    "symbol": symbol,
+                    "open_interest": Decimal("10"),
+                    "open_interest_value": Decimal("1000"),
+                }
+            ]
+
+        async def open_interest(self, symbol: str) -> dict[str, object]:
+            self.current_called = True
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "open_interest": Decimal("11"),
+                "open_interest_value": None,
+            }
+
+    async def fake_upsert_mark_price(session: object, row: dict[str, object]) -> None:
+        captured["mark_price"] = row
+
+    async def fake_upsert_open_interest(session: object, row: dict[str, object]) -> None:
+        captured.setdefault("open_interest", []).append(row)
+
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_mark_price", fake_upsert_mark_price)
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_open_interest", fake_upsert_open_interest)
+    rest = Rest()
+
+    await poll_symbol_public_context(rest, object(), "BTCUSDT", 0)  # type: ignore[arg-type]
+
+    assert rest.current_called is False
+    assert captured["open_interest"] == [
+        {
+            "ts": datetime.fromtimestamp(1710000000, tz=UTC),
+            "symbol": "BTCUSDT",
+            "open_interest": Decimal("10"),
+            "open_interest_value": Decimal("1000"),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_poll_symbol_public_context_falls_back_when_open_interest_history_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, list[dict[str, object]] | dict[str, object]] = {}
+
+    class Rest:
+        async def premium_index(self, symbol: str) -> dict[str, object]:
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "mark_price": Decimal("100"),
+            }
+
+        async def open_interest_history(
+            self, symbol: str, period: str = "5m", limit: int = 30
+        ) -> list[dict[str, object]]:
+            raise httpx.HTTPError("history unavailable")
+
+        async def open_interest(self, symbol: str) -> dict[str, object]:
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "open_interest": Decimal("11"),
+                "open_interest_value": None,
+            }
+
+    async def fake_upsert_mark_price(session: object, row: dict[str, object]) -> None:
+        captured["mark_price"] = row
+
+    async def fake_upsert_open_interest(session: object, row: dict[str, object]) -> None:
+        captured.setdefault("open_interest", []).append(row)
+
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_mark_price", fake_upsert_mark_price)
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_open_interest", fake_upsert_open_interest)
+
+    await poll_symbol_public_context(Rest(), object(), "BTCUSDT", 0)  # type: ignore[arg-type]
+
+    assert captured["open_interest"] == [
+        {
+            "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+            "symbol": "BTCUSDT",
+            "open_interest": Decimal("11"),
+            "open_interest_value": Decimal("1100"),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_poll_symbol_public_context_can_skip_open_interest_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    class Rest:
+        async def premium_index(self, symbol: str) -> dict[str, object]:
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "mark_price": Decimal("100"),
+            }
+
+        async def open_interest_history(
+            self, symbol: str, period: str = "5m", limit: int = 30
+        ) -> list[dict[str, object]]:
+            raise AssertionError("OI history should be skipped")
+
+    async def fake_upsert_mark_price(session: object, row: dict[str, object]) -> None:
+        captured["mark_price"] = row
+
+    async def fake_upsert_open_interest(session: object, row: dict[str, object]) -> None:
+        raise AssertionError("OI upsert should be skipped")
+
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_mark_price", fake_upsert_mark_price)
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_open_interest", fake_upsert_open_interest)
+
+    await poll_symbol_public_context(
+        Rest(),
+        object(),
+        "BTCUSDT",
+        0,
+        poll_open_interest=False,
+    )  # type: ignore[arg-type]
+
+    assert captured["mark_price"]["symbol"] == "BTCUSDT"
+
+
+@pytest.mark.asyncio
+async def test_poll_symbol_public_context_falls_back_when_open_interest_history_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, list[dict[str, object]] | dict[str, object]] = {}
+
+    class Rest:
+        async def premium_index(self, symbol: str) -> dict[str, object]:
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "mark_price": Decimal("100"),
+            }
+
+        async def open_interest_history(
+            self, symbol: str, period: str = "5m", limit: int = 30
+        ) -> list[dict[str, object]]:
+            return []
+
+        async def open_interest(self, symbol: str) -> dict[str, object]:
+            return {
+                "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+                "symbol": symbol,
+                "open_interest": Decimal("12"),
+                "open_interest_value": None,
+            }
+
+    async def fake_upsert_mark_price(session: object, row: dict[str, object]) -> None:
+        captured["mark_price"] = row
+
+    async def fake_upsert_open_interest(session: object, row: dict[str, object]) -> None:
+        captured.setdefault("open_interest", []).append(row)
+
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_mark_price", fake_upsert_mark_price)
+    monkeypatch.setattr("bn_monitor.binance.repository.upsert_open_interest", fake_upsert_open_interest)
+
+    await poll_symbol_public_context(Rest(), object(), "BTCUSDT", 0)  # type: ignore[arg-type]
+
+    assert captured["open_interest"] == [
+        {
+            "ts": datetime.fromtimestamp(1710000060, tz=UTC),
+            "symbol": "BTCUSDT",
+            "open_interest": Decimal("12"),
+            "open_interest_value": Decimal("1200"),
+        }
+    ]

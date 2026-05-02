@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import bindparam, text
 
@@ -23,6 +23,16 @@ from bn_monitor.quality import kline_gap_reports, table_freshness_reports
 from bn_monitor.reports import alert_summary
 
 
+RETENTION_TABLES: tuple[str, ...] = (
+    "futures_kline_1m",
+    "futures_open_interest",
+    "futures_mark_price",
+    "liquidation_snapshots",
+    "market_factor_1m",
+    "indicator_snapshot_1m",
+)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bn-monitor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -32,6 +42,7 @@ def main() -> None:
     sub.add_parser("test-discord")
     sub.add_parser("compute-indicators")
     sub.add_parser("generate-alerts")
+    sub.add_parser("retention-run")
     quality = sub.add_parser("data-quality")
     quality.add_argument("--lookback-hours", type=int, default=24)
     quality.add_argument("--max-staleness-minutes", type=int, default=None)
@@ -63,6 +74,8 @@ def main() -> None:
         asyncio.run(_compute_indicators(settings))
     elif args.command == "generate-alerts":
         asyncio.run(_generate_alerts(settings))
+    elif args.command == "retention-run":
+        asyncio.run(_retention_run(settings))
     elif args.command == "data-quality":
         asyncio.run(_data_quality(settings, args.lookback_hours, args.max_staleness_minutes))
     elif args.command == "alert-summary":
@@ -221,6 +234,35 @@ async def _generate_alerts(settings) -> None:
     finally:
         if discord:
             await discord.close()
+        await engine.dispose()
+
+
+async def _retention_run(settings) -> None:
+    cutoff = datetime.now(UTC) - timedelta(days=settings.data_retention_days)
+    engine = create_engine(settings.database_url)
+    deleted_rows: dict[str, int] = {}
+    try:
+        async with engine.begin() as conn:
+            for table in RETENTION_TABLES:
+                result = await conn.execute(
+                    text(f"DELETE FROM {table} WHERE ts < :cutoff"),
+                    {"cutoff": cutoff},
+                )
+                deleted_rows[table] = result.rowcount or 0
+        print(
+            json.dumps(
+                {
+                    "retention_days": settings.data_retention_days,
+                    "cutoff": cutoff,
+                    "deleted_rows": deleted_rows,
+                    "total_deleted": sum(deleted_rows.values()),
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+    finally:
         await engine.dispose()
 
 
@@ -411,10 +453,12 @@ def _config_payload(settings) -> dict[str, object]:
             "digest_trigger_count": settings.digest_trigger_count,
             "max_live_alerts_per_cycle": settings.max_live_alerts_per_cycle,
             "alert_cooldown_minutes": settings.alert_cooldown_minutes,
+            "data_retention_days": settings.data_retention_days,
         },
         "intervals": {
             "rest_poll_interval_seconds": settings.rest_poll_interval_seconds,
             "rest_max_requests_per_second": settings.rest_max_requests_per_second,
+            "open_interest_poll_interval_seconds": settings.open_interest_poll_interval_seconds,
             "indicator_poll_interval_seconds": settings.indicator_poll_interval_seconds,
             "ws_kline_stream_chunk_size": settings.ws_kline_stream_chunk_size,
             "kline_backfill_limit": settings.kline_backfill_limit,

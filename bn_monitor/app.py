@@ -49,6 +49,7 @@ class MonitorApp:
                     self.session_factory,
                     self.settings.rest_poll_interval_seconds,
                     self.settings.kline_backfill_limit,
+                    self.settings.open_interest_poll_interval_seconds,
                 ),
                 self.run_indicator_loop(),
             )
@@ -58,6 +59,11 @@ class MonitorApp:
 
     async def sync_universe_once(self, rest: BinanceRestClient) -> None:
         symbols_payload = await rest.exchange_info()
+        quote_volumes_24h = (
+            await rest.quote_volumes_24h()
+            if self.settings.universe_mode == "all_usdt_perpetual"
+            else None
+        )
         async with self.session_factory() as session:
             async with session.begin():
                 await repository.upsert_symbols(session, symbols_payload)
@@ -66,6 +72,8 @@ class MonitorApp:
             self.settings.symbols,
             self.settings.universe_mode,
             self.settings.excluded_symbols,
+            quote_volumes_24h,
+            self.settings.min_24h_quote_volume_usd,
         )
         self._symbol_set = frozenset(self.symbols)
         log.info("universe_synced", mode=self.settings.universe_mode, symbols=len(self.symbols))
