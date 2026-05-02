@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -223,7 +224,8 @@ class BinanceStream:
         backoff = 1
         while True:
             try:
-                async with websockets.connect(self.stream_url(), ping_interval=20, ping_timeout=20) as ws:
+                proxy = os.environ.get("ALL_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+                async with websockets.connect(self.stream_url(), ping_interval=20, ping_timeout=20, proxy=proxy or None) as ws:
                     log.info("binance_ws_connected")
                     backoff = 1
                     async for raw in ws:

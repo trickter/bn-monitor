@@ -266,11 +266,11 @@ async def _prior_closes(session: AsyncSession, symbol: str, ts: datetime) -> dic
             text(
                 """
                 SELECT close FROM futures_kline_1m
-                WHERE symbol=:symbol AND ts <= :ts - (:minutes || ' minutes')::interval
+                WHERE symbol=:symbol AND ts <= :cutoff
                 ORDER BY ts DESC LIMIT 1
                 """
             ),
-            {"symbol": symbol, "ts": ts, "minutes": minutes},
+            {"symbol": symbol, "cutoff": ts - timedelta(minutes=minutes)},
         )
         row = result.mappings().first()
         if row:
