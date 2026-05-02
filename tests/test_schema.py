@@ -20,7 +20,7 @@ def test_healthcheck_command_checks_hypertables() -> None:
     assert "_timescaledb_catalog.hypertable" in source
     assert "missing hypertables" in source
     assert "alembic_version" in source
-    assert "0002_add_contract_type_to_symbols" in source
+    assert "0002_contract_type_symbols" in source
 
 
 def test_alert_delivery_update_uses_full_hypertable_primary_key() -> None:

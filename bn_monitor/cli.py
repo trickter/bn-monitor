@@ -178,7 +178,7 @@ async def _healthcheck(settings) -> None:
         missing = sorted(required_tables - set(rows))
         if missing:
             raise SystemExit(f"missing tables: {', '.join(missing)}")
-        if alembic_revision != "0002_add_contract_type_to_symbols":
+        if alembic_revision != "0002_contract_type_symbols":
             raise SystemExit(f"unexpected alembic revision: {alembic_revision}")
         missing_hypertables = sorted(
             {
