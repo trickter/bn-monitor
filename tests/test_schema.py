@@ -20,7 +20,7 @@ def test_healthcheck_command_checks_hypertables() -> None:
     assert "_timescaledb_catalog.hypertable" in source
     assert "missing hypertables" in source
     assert "alembic_version" in source
-    assert "0001_initial" in source
+    assert "0002_add_contract_type_to_symbols" in source
 
 
 def test_alert_delivery_update_uses_full_hypertable_primary_key() -> None:
@@ -74,11 +74,12 @@ def test_migration_has_replay_and_history_indexes() -> None:
     assert "ix_indicator_snapshot_1m_symbol_ts" in migration
     assert "price_move_norm_15m" in migration
     assert "oi_move_norm_15m" in migration
+    assert "contract_type" in migration
 
 
 def test_native_sql_uses_expanding_symbol_filters() -> None:
     for path in Path("bn_monitor").glob("*.py"):
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         assert "ANY(:symbols)" not in source
 
 
@@ -87,6 +88,8 @@ def test_alert_summary_command_exists() -> None:
 
     source = inspect.getsource(main)
     assert "alert-summary" in source
+    assert "alert-projection" in source
+    assert "alert-show" in source
     assert "--symbol" in source
     assert "--alert-type" in source
     assert "--severity" in source
@@ -106,6 +109,8 @@ def test_config_dump_redacts_secrets_and_exposes_thresholds() -> None:
     assert payload["discord_webhook_configured"] is True
     assert "discord.example" not in str(payload)
     assert payload["thresholds"]["price_threshold_bps"] == 35
+    assert payload["thresholds"]["flat_oi_volume_percentile_threshold"] == 0.9
+    assert payload["intervals"]["rest_max_requests_per_second"] == 15
     assert payload["intervals"]["indicator_poll_interval_seconds"] == 5
 
 
@@ -163,6 +168,8 @@ def test_env_example_covers_runtime_settings() -> None:
         "BINANCE_REST_URL",
         "BINANCE_WS_URL",
         "SYMBOLS",
+        "UNIVERSE_MODE",
+        "EXCLUDED_SYMBOLS",
         "ALERT_MODE",
         "DISCORD_WEBHOOK_URL",
         "KLINE_GAP_MAX_RATIO",
@@ -174,6 +181,12 @@ def test_env_example_covers_runtime_settings() -> None:
         "DISCORD_CAPACITY",
         "DISCORD_REFILL_PER_SECOND",
         "DIGEST_TRIGGER_COUNT",
+        "REST_MAX_REQUESTS_PER_SECOND",
+        "WS_KLINE_STREAM_CHUNK_SIZE",
+        "FLAT_OI_VOLUME_PERCENTILE_THRESHOLD",
+        "FLAT_OI_MIN_OI_CHANGE_BPS",
+        "NORMALIZED_MOVE_MIN_MAD_BPS",
+        "MAX_LIVE_ALERTS_PER_CYCLE",
     ]
     for key in expected_keys:
         assert f"{key}=" in env

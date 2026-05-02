@@ -89,6 +89,8 @@ class BinanceRestClient:
         payload = response.json()
         rows: list[dict[str, Any]] = []
         for item in payload["symbols"]:
+            if not _is_usdt_perpetual_trading_symbol(item):
+                continue
             filters = {flt["filterType"]: flt for flt in item.get("filters", [])}
             rows.append(
                 {
@@ -97,6 +99,7 @@ class BinanceRestClient:
                     "symbol": item["symbol"],
                     "base_asset": item["baseAsset"],
                     "quote_asset": item["quoteAsset"],
+                    "contract_type": item.get("contractType"),
                     "status": item["status"],
                     "tick_size": Decimal(filters.get("PRICE_FILTER", {}).get("tickSize", "0")),
                     "step_size": Decimal(filters.get("LOT_SIZE", {}).get("stepSize", "0")),
@@ -211,27 +214,38 @@ def _retry_after(response: httpx.Response) -> float:
 
 
 class BinanceStream:
-    def __init__(self, ws_url: str, symbols: list[str]) -> None:
+    def __init__(self, ws_url: str, symbols: list[str], kline_chunk_size: int = 300) -> None:
         self.ws_url = ws_url.rstrip("/")
         self.symbols = symbols
+        self.kline_chunk_size = kline_chunk_size
 
     def stream_url(self) -> str:
-        streams = [f"{symbol.lower()}@kline_1m" for symbol in self.symbols]
-        streams.extend(["!markPrice@arr@1s", "!forceOrder@arr"])
-        return f"{self.ws_url}/stream?streams={'/'.join(streams)}"
+        return self.stream_urls()[0]
+
+    def stream_urls(self) -> list[str]:
+        urls = []
+        for chunk in _chunks(self.symbols, self.kline_chunk_size):
+            streams = [f"{symbol.lower()}@kline_1m" for symbol in chunk]
+            urls.append(_combined_market_stream_url(self.ws_url, streams))
+        urls.append(_combined_market_stream_url(self.ws_url, ["!markPrice@arr@1s", "!forceOrder@arr"]))
+        return urls
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
+        async for message in self.messages_from_url(self.stream_url()):
+            yield message
+
+    async def messages_from_url(self, url: str) -> AsyncIterator[dict[str, Any]]:
         backoff = 1
         while True:
             try:
                 proxy = os.environ.get("ALL_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-                async with websockets.connect(self.stream_url(), ping_interval=20, ping_timeout=20, proxy=proxy or None) as ws:
-                    log.info("binance_ws_connected")
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, proxy=proxy or None) as ws:
+                    log.info("binance_ws_connected", url=url)
                     backoff = 1
                     async for raw in ws:
                         yield json.loads(raw)
             except Exception as exc:
-                log.warning("binance_ws_disconnected", error=str(exc), backoff=backoff)
+                log.warning("binance_ws_disconnected", error=str(exc), backoff=backoff, url=url)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
@@ -261,6 +275,7 @@ async def poll_rest_forever(
     kline_backfill_limit: int = 180,
 ) -> None:
     funding_history_seeded = False
+    kline_backfill_seeded = False
     while True:
         try:
             symbols_payload = await rest.exchange_info()
@@ -272,7 +287,10 @@ async def poll_rest_forever(
                     async with session_factory() as session:
                         async with session.begin():
                             await poll_symbol_public_context(
-                                rest, session, symbol, kline_backfill_limit
+                                rest,
+                                session,
+                                symbol,
+                                kline_backfill_limit if not kline_backfill_seeded else 0,
                             )
                 except Exception as exc:
                     log.warning(
@@ -282,6 +300,7 @@ async def poll_rest_forever(
                     )
             if not funding_history_seeded:
                 funding_history_seeded = await seed_funding_history_once(rest, symbols, session_factory)
+            kline_backfill_seeded = True
             log.info("binance_rest_poll_complete", symbols=len(symbols))
         except Exception as exc:
             log.warning("binance_rest_poll_failed", error=str(exc))
@@ -294,8 +313,9 @@ async def poll_symbol_public_context(
     symbol: str,
     kline_backfill_limit: int,
 ) -> None:
-    for row in await rest.klines_1m(symbol, limit=kline_backfill_limit):
-        await repository.upsert_kline(session, row)
+    if kline_backfill_limit > 0:
+        for row in await rest.klines_1m(symbol, limit=kline_backfill_limit):
+            await repository.upsert_kline(session, row)
     mark_price = await rest.premium_index(symbol)
     await repository.upsert_mark_price(session, mark_price)
     open_interest = await rest.open_interest(symbol)
@@ -324,3 +344,30 @@ async def seed_funding_history_once(
         return True
     log.warning("binance_funding_history_seed_incomplete", seeded=seeded, symbols=len(symbols), limit=limit)
     return False
+
+
+def _is_usdt_perpetual_trading_symbol(item: dict[str, Any]) -> bool:
+    return (
+        item.get("quoteAsset") == "USDT"
+        and item.get("status") == "TRADING"
+        and item.get("contractType") == "PERPETUAL"
+    )
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    if size <= 0:
+        raise ValueError("chunk size must be positive")
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _combined_market_stream_url(ws_url: str, streams: list[str]) -> str:
+    return f"{ws_url.rstrip('/')}/market/stream?streams={'/'.join(streams)}"
+
+
+def select_universe_symbols(rows: list[dict[str, Any]], configured: list[str], mode: str, excluded: list[str]) -> list[str]:
+    excluded_set = {symbol.upper() for symbol in excluded}
+    if mode == "all_usdt_perpetual":
+        symbols = [row["symbol"].upper() for row in rows if row.get("is_active")]
+    else:
+        symbols = [symbol.upper() for symbol in configured]
+    return [symbol for symbol in symbols if symbol not in excluded_set]

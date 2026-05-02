@@ -34,6 +34,7 @@ def test_robust_baseline_and_indicator_snapshot() -> None:
         {1: Decimal("100"), 5: Decimal("98"), 15: Decimal("96")},
         [Decimal(i) for i in range(100, 1000, 100)],
         Decimal("0.005"),
+        Decimal("0.004"),
         oi_now=Decimal("110"),
         oi_5m=Decimal("100"),
         oi_15m=Decimal("90"),
@@ -51,6 +52,8 @@ def test_robust_baseline_and_indicator_snapshot() -> None:
     )
     assert indicator["return_1m"] == Decimal("0.02")
     assert indicator["btc_relative_return_1m"] == Decimal("0.015")
+    assert indicator["market_relative_return_1m"] == Decimal("0.016")
+    assert indicator["price_spike_score"] == Decimal("0.015")
     assert indicator["taker_buy_ratio"] == Decimal("0.8")
     assert indicator["taker_sell_ratio"] == Decimal("0.2")
     assert indicator["funding_percentile"] == Decimal("0.8")
@@ -63,12 +66,18 @@ def test_kline_gap_ratio_calculation() -> None:
     assert calculate_gap_ratio(0, 0) == Decimal("0")
     assert expected_minutes_for_lookback(24) == 1440
     assert normalized_move(Decimal("0.02"), [Decimal("-0.02"), Decimal("-0.01"), Decimal("0"), Decimal("0.01"), Decimal("0.02")]) == Decimal("2")
+    assert normalized_move(
+        Decimal("0.02"),
+        [Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0.00001")],
+        min_mad=Decimal("0.01"),
+    ) == Decimal("2")
 
 
-def test_indicator_query_uses_single_latest_minute() -> None:
+def test_indicator_query_uses_per_symbol_latest_minute() -> None:
     query = latest_common_minute_query_shape()
-    assert "HAVING count(DISTINCT symbol) = :symbol_count" in query
-    assert "AND ts = :ts" in query
+    assert "DISTINCT ON (symbol)" in query
+    assert "AND ts >= :stale_after" in query
+    assert "HAVING count(DISTINCT symbol) = :symbol_count" not in query
 
 
 def test_missing_symbol_gap_report_shape() -> None:

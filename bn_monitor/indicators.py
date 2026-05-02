@@ -13,25 +13,23 @@ from bn_monitor import repository
 
 D0 = Decimal("0")
 D1 = Decimal("1")
-LATEST_TS_QUERY = """
-                SELECT ts
-                FROM futures_kline_1m
-                WHERE symbol IN :symbols
-                GROUP BY ts
-                HAVING count(DISTINCT symbol) = :symbol_count
-                ORDER BY ts DESC
-                LIMIT 1
-                """
-LATEST_MINUTE_ROWS_QUERY = """
+DEFAULT_NORMALIZED_MOVE_MIN_MAD = Decimal("0.0001")
+LATEST_SYMBOL_ROWS_QUERY = """
                 SELECT ts, symbol, open, high, low, close, quote_volume, taker_buy_quote_volume
-                FROM futures_kline_1m
-                WHERE symbol IN :symbols AND ts = :ts
+                FROM (
+                    SELECT DISTINCT ON (symbol)
+                        ts, symbol, open, high, low, close, quote_volume, taker_buy_quote_volume
+                    FROM futures_kline_1m
+                    WHERE symbol IN :symbols
+                      AND ts >= :stale_after
+                    ORDER BY symbol, ts DESC
+                ) latest
                 ORDER BY symbol
                 """
 
 
 def latest_common_minute_query_shape() -> str:
-    return f"{LATEST_TS_QUERY}\n{LATEST_MINUTE_ROWS_QUERY}"
+    return LATEST_SYMBOL_ROWS_QUERY
 
 
 @dataclass(frozen=True)
@@ -67,15 +65,22 @@ def rolling_mad(sample: list[Decimal]) -> Decimal | None:
         return None
     med = median(sample)
     mad = median([abs(item - med) for item in sample])
-    return mad if mad != 0 else None
+    return mad
 
 
-def normalized_move(value: Decimal | None, sample: list[Decimal], absolute: bool = True) -> Decimal | None:
+def normalized_move(
+    value: Decimal | None,
+    sample: list[Decimal],
+    absolute: bool = True,
+    min_mad: Decimal | None = DEFAULT_NORMALIZED_MOVE_MIN_MAD,
+) -> Decimal | None:
     if value is None:
         return None
     mad = rolling_mad(sample)
     if mad is None:
         return None
+    if min_mad is not None and mad < min_mad:
+        mad = min_mad
     numerator = abs(value) if absolute else value
     return numerator / mad
 
@@ -111,6 +116,7 @@ def build_indicator(
     closes: dict[int, Decimal],
     volume_sample: list[Decimal],
     btc_return_1m: Decimal | None,
+    market_median_return_1m: Decimal | None = None,
     oi_now: Decimal | None = None,
     oi_5m: Decimal | None = None,
     oi_15m: Decimal | None = None,
@@ -118,6 +124,7 @@ def build_indicator(
     funding_rate: Decimal | None = None,
     funding_percentile: Decimal | None = None,
     return_15m_sample: list[Decimal] | None = None,
+    normalized_move_min_mad: Decimal = DEFAULT_NORMALIZED_MOVE_MIN_MAD,
 ) -> dict[str, Any]:
     return_1m = pct_change(current.close, closes.get(1))
     return_5m = pct_change(current.close, closes.get(5))
@@ -131,11 +138,31 @@ def build_indicator(
     oi_z = None
     if oi_change_15m is not None and oi_change_sample:
         oi_z = robust_z(oi_change_15m, oi_change_sample)
-    price_move_norm = normalized_move(return_15m, return_15m_sample or [], absolute=True)
-    oi_move_norm = normalized_move(oi_change_15m, oi_change_sample or [], absolute=False)
+    price_move_norm = normalized_move(
+        return_15m,
+        return_15m_sample or [],
+        absolute=True,
+        min_mad=normalized_move_min_mad,
+    )
+    oi_move_norm = normalized_move(
+        oi_change_15m,
+        oi_change_sample or [],
+        absolute=False,
+        min_mad=normalized_move_min_mad,
+    )
     btc_relative = return_1m - btc_return_1m if return_1m is not None and btc_return_1m is not None else None
-    price_score = abs(btc_relative) if btc_relative is not None else None
-    flat_oi_score = oi_move_norm if oi_move_norm is not None else None
+    market_relative = (
+        return_1m - market_median_return_1m
+        if return_1m is not None and market_median_return_1m is not None
+        else None
+    )
+    if current.symbol in {"BTCUSDT", "ETHUSDT"}:
+        price_score = abs(market_relative) if market_relative is not None else None
+    elif btc_relative is not None and market_relative is not None:
+        price_score = min(abs(btc_relative), abs(market_relative))
+    else:
+        price_score = None
+    flat_oi_score = oi_change_15m * Decimal("10000") if oi_change_15m is not None else None
     return {
         "ts": current.ts,
         "symbol": current.symbol,
@@ -143,6 +170,8 @@ def build_indicator(
         "return_5m": return_5m,
         "return_15m": return_15m,
         "btc_relative_return_1m": btc_relative,
+        "market_median_return_1m": market_median_return_1m,
+        "market_relative_return_1m": market_relative,
         "beta_adjusted_return_1m": btc_relative,
         "quote_volume_1m": current.quote_volume,
         "volume_percentile": volume_pct,
@@ -163,24 +192,19 @@ def build_indicator(
     }
 
 
-async def compute_latest_indicators(session: AsyncSession, symbols: list[str]) -> int:
-    latest_ts = (
-        await session.execute(
-            text(
-                LATEST_TS_QUERY
-            ).bindparams(bindparam("symbols", expanding=True)),
-            {"symbols": symbols, "symbol_count": len(set(symbols))},
-        )
-    ).scalar_one_or_none()
-    if latest_ts is None:
-        return 0
-
+async def compute_latest_indicators(
+    session: AsyncSession,
+    symbols: list[str],
+    max_staleness_minutes: int = 5,
+    normalized_move_min_mad_bps: float | Decimal = Decimal("1"),
+) -> int:
+    stale_after = datetime.now(UTC) - timedelta(minutes=max_staleness_minutes)
     rows = (
         await session.execute(
             text(
-                LATEST_MINUTE_ROWS_QUERY
+                LATEST_SYMBOL_ROWS_QUERY
             ).bindparams(bindparam("symbols", expanding=True)),
-            {"symbols": symbols, "ts": latest_ts},
+            {"symbols": symbols, "stale_after": stale_after},
         )
     ).mappings().all()
     if not rows:
@@ -199,52 +223,63 @@ async def compute_latest_indicators(session: AsyncSession, symbols: list[str]) -
         )
         for row in rows
     }
+    closes_by_symbol: dict[str, dict[int, Decimal]] = {}
+    returns_by_symbol: dict[str, Decimal] = {}
+    market_ts = (
+        latest_by_symbol["BTCUSDT"].ts
+        if "BTCUSDT" in latest_by_symbol
+        else max(point.ts for point in latest_by_symbol.values())
+    )
     btc_return = None
-    if "BTCUSDT" in latest_by_symbol:
-        btc_return = await _return_for_symbol(session, "BTCUSDT", latest_by_symbol["BTCUSDT"])
-
-    count = 0
-    returns: list[Decimal] = []
-    market_ts = max(point.ts for point in latest_by_symbol.values())
     eth_return = None
     for symbol, point in latest_by_symbol.items():
         closes = await _prior_closes(session, symbol, point.ts)
+        closes_by_symbol[symbol] = closes
+        return_1m = pct_change(point.close, closes.get(1))
+        if return_1m is not None:
+            returns_by_symbol[symbol] = return_1m
+        if symbol == "BTCUSDT":
+            btc_return = return_1m
+        if symbol == "ETHUSDT":
+            eth_return = return_1m
+
+    market_median = median(returns_by_symbol.values()) if returns_by_symbol else None
+    dispersion = (
+        median([abs(item - market_median) for item in returns_by_symbol.values()])
+        if market_median is not None
+        else None
+    )
+    min_mad = Decimal(str(normalized_move_min_mad_bps)) / Decimal("10000")
+
+    count = 0
+    for symbol, point in latest_by_symbol.items():
         indicator = build_indicator(
             point,
-            closes,
+            closes_by_symbol[symbol],
             await _volume_sample(session, symbol, point.ts),
             btc_return,
+            market_median,
             *(await _oi_context(session, symbol, point.ts)),
             **await _funding_context(session, symbol, point.ts),
             return_15m_sample=await _return_15m_sample(session, symbol, point.ts),
+            normalized_move_min_mad=min_mad,
         )
         await repository.upsert_indicator(session, indicator)
-        if indicator["return_1m"] is not None:
-            returns.append(indicator["return_1m"])
-        if symbol == "ETHUSDT":
-            eth_return = indicator["return_1m"]
         count += 1
 
-    if returns:
-        med = median(returns)
-        dispersion = median([abs(item - med) for item in returns])
+    if market_median is not None:
         await repository.upsert_market_factor(
             session,
             {
                 "ts": market_ts,
                 "btc_return_1m": btc_return,
                 "eth_return_1m": eth_return,
-                "market_median_return_1m": med,
+                "market_median_return_1m": market_median,
                 "market_dispersion_1m": dispersion,
                 "created_at": datetime.now(UTC),
             },
         )
     return count
-
-
-async def _return_for_symbol(session: AsyncSession, symbol: str, point: KlinePoint) -> Decimal | None:
-    closes = await _prior_closes(session, symbol, point.ts)
-    return pct_change(point.close, closes.get(1))
 
 
 async def _prior_closes(session: AsyncSession, symbol: str, ts: datetime) -> dict[int, Decimal]:

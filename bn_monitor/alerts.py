@@ -47,9 +47,34 @@ def _as_decimal(value: Any, default: str = "0") -> Decimal:
     return Decimal(str(value))
 
 
+def _optional_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _directional_relative_bps(indicator: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
+    symbol = str(indicator.get("symbol", ""))
+    market_rel = _optional_decimal(indicator.get("market_relative_return_1m"))
+    if symbol in {"BTCUSDT", "ETHUSDT"}:
+        return (
+            market_rel * Decimal("10000") if market_rel is not None else None,
+            market_rel * Decimal("10000") if market_rel is not None else None,
+        )
+    btc_rel = _optional_decimal(indicator.get("btc_relative_return_1m"))
+    return (
+        btc_rel * Decimal("10000") if btc_rel is not None else None,
+        market_rel * Decimal("10000") if market_rel is not None else None,
+    )
+
+
 def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[AlertDecision]:
-    rel = _as_decimal(indicator.get("btc_relative_return_1m"))
-    rel_bps = rel * Decimal("10000")
+    rel = _optional_decimal(indicator.get("btc_relative_return_1m"))
+    market_rel = _optional_decimal(indicator.get("market_relative_return_1m"))
+    btc_rel_bps, market_rel_bps = _directional_relative_bps(indicator)
+    rel_bps = btc_rel_bps if btc_rel_bps is not None else Decimal("0")
     vol_pct = _as_decimal(indicator.get("volume_percentile"))
     vol_z = _as_decimal(indicator.get("volume_robust_z"))
     buy_ratio = _as_decimal(indicator.get("taker_buy_ratio"), "0.5")
@@ -65,7 +90,9 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
         "symbol": indicator["symbol"],
         "ts": indicator["ts"].isoformat() if hasattr(indicator["ts"], "isoformat") else str(indicator["ts"]),
         "btc_return_1m": str(_as_decimal(indicator.get("btc_return_1m"))),
-        "btc_relative_return_1m": str(rel),
+        "market_median_return_1m": str(_as_decimal(indicator.get("market_median_return_1m"))),
+        "btc_relative_return_1m": str(rel if rel is not None else ""),
+        "market_relative_return_1m": str(market_rel if market_rel is not None else ""),
         "volume_percentile": str(vol_pct),
         "volume_robust_z": str(vol_z),
         "taker_buy_ratio": str(buy_ratio),
@@ -78,7 +105,14 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
     }
 
     threshold = Decimal(str(settings.price_threshold_bps))
-    if rel_bps > threshold and volume_ok and buy_ratio >= Decimal("0.75"):
+    directional_ready = btc_rel_bps is not None and market_rel_bps is not None
+    if (
+        directional_ready
+        and btc_rel_bps > threshold
+        and market_rel_bps > threshold
+        and volume_ok
+        and buy_ratio >= Decimal("0.75")
+    ):
         severity = "CRITICAL" if oi_z >= Decimal(str(settings.oi_buildup_threshold)) else "WARNING"
         payload = {**common_payload, "trigger_conditions": ["relative price up", "volume anomaly", "active buy"]}
         alerts.append(AlertDecision(
@@ -88,7 +122,13 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
             payload,
         ))
 
-    if rel_bps < -threshold and volume_ok and buy_ratio <= Decimal("0.25"):
+    if (
+        directional_ready
+        and btc_rel_bps < -threshold
+        and market_rel_bps < -threshold
+        and volume_ok
+        and buy_ratio <= Decimal("0.25")
+    ):
         severity = "CRITICAL" if oi_z >= Decimal(str(settings.oi_buildup_threshold)) else "WARNING"
         payload = {**common_payload, "trigger_conditions": ["relative price down", "volume anomaly", "active sell"]}
         alerts.append(AlertDecision(
@@ -100,7 +140,12 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
 
     small_move = Decimal(str(settings.small_move_threshold_bps))
     range_not_extreme = range_bps <= Decimal("200")
-    if abs(rel_bps) < small_move and volume_ok and body <= Decimal("0.35") and range_not_extreme:
+    small_relative_move = (
+        directional_ready
+        and abs(btc_rel_bps) < small_move
+        and abs(market_rel_bps) < small_move
+    )
+    if small_relative_move and volume_ok and body <= Decimal("0.35") and range_not_extreme:
         if buy_ratio >= Decimal("0.75"):
             payload = {**common_payload, "trigger_conditions": ["active buy", "small close move", "small body"]}
             alerts.append(AlertDecision(
@@ -120,21 +165,26 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
 
     price_norm = indicator.get("price_move_norm_15m")
     oi_norm = indicator.get("oi_move_norm_15m")
+    oi_change = _optional_decimal(indicator.get("oi_change_15m"))
+    oi_change_bps = oi_change * Decimal("10000") if oi_change is not None else None
     if (
         price_norm is not None
         and oi_norm is not None
+        and oi_change_bps is not None
         and _as_decimal(oi_norm) >= Decimal(str(settings.oi_buildup_threshold))
+        and oi_change_bps >= Decimal(str(settings.flat_oi_min_oi_change_bps))
         and _as_decimal(price_norm) <= Decimal(str(settings.price_flat_norm_threshold))
-        and vol_pct >= Decimal("0.70")
+        and vol_pct >= Decimal(str(settings.flat_oi_volume_percentile_threshold))
     ):
         payload = {
             **common_payload,
             "trigger_conditions": ["OI buildup", "volatility-normalized flat price", "volume support"],
             "price_move_norm_15m": str(price_norm),
             "oi_move_norm_15m": str(oi_norm),
+            "oi_change_bps_15m": str(oi_change_bps),
         }
         alerts.append(AlertDecision(
-            "flat_oi_buildup", "WARNING", "neutral", oi_z,
+            "flat_oi_buildup", "WARNING", "neutral", _as_decimal(indicator.get("flat_oi_buildup_score")),
             f"{indicator['symbol']} flat-price OI buildup",
             "Price is relatively flat while open interest builds, indicating leverage divergence.",
             payload,
@@ -197,17 +247,20 @@ class AlertService:
     def should_send(self, alert: AlertDecision, now: datetime) -> bool:
         key = f"{alert.payload['symbol']}:{alert.alert_type}"
         last = self._memory_cooldowns.get(key)
-        window = cooldown_window(alert.severity)
+        window = cooldown_window(alert, self.settings)
         if last and now - last < window:
             return False
         self._memory_cooldowns[key] = now
         return True
 
     async def should_send_with_persistent_cooldown(
-        self, session: AsyncSession, alert: AlertDecision, now: datetime
+        self, session: AsyncSession, alert: AlertDecision, now: datetime, bypass: bool = False
     ) -> bool:
+        if bypass:
+            self._memory_cooldowns[f"{alert.payload['symbol']}:{alert.alert_type}"] = now
+            return True
         key = f"{alert.payload['symbol']}:{alert.alert_type}"
-        window = cooldown_window(alert.severity)
+        window = cooldown_window(alert, self.settings)
         last = self._memory_cooldowns.get(key)
         if last and now - last < window:
             return False
@@ -218,7 +271,12 @@ class AlertService:
         self._memory_cooldowns[key] = now
         return True
 
-    async def persist_and_deliver(self, session: AsyncSession, decision: AlertDecision) -> int | None:
+    async def persist_and_deliver(
+        self,
+        session: AsyncSession,
+        decision: AlertDecision,
+        suppress_delivery: bool = False,
+    ) -> int | None:
         now = datetime.now(UTC)
         source_ts = _parse_source_ts(decision.payload.get("ts"), now)
         symbol = str(decision.payload.get("symbol", "MARKET"))
@@ -245,7 +303,17 @@ class AlertService:
         if self.settings.alert_mode == "shadow":
             alert_key = await repository.insert_alert(session, alert, "shadow", "shadow")
             return alert_key[1] if alert_key else None
-        if not await self.should_send_with_persistent_cooldown(session, decision, now):
+        critical_escalation = (
+            parent is not None
+            and decision.severity == "CRITICAL"
+            and parent.get("severity") != "CRITICAL"
+        )
+        if suppress_delivery:
+            alert_key = await repository.insert_alert(session, alert, "live", "suppressed")
+            return alert_key[1] if alert_key else None
+        if not await self.should_send_with_persistent_cooldown(
+            session, decision, now, bypass=critical_escalation
+        ):
             alert_key = await repository.insert_alert(session, alert, "live", "suppressed")
             return alert_key[1] if alert_key else None
         alert_key = await repository.insert_alert(session, alert, "live", "pending")
@@ -277,8 +345,18 @@ class AlertService:
         await repository.update_cooldown(session, key, now, score, count_1h)
 
 
-def cooldown_window(severity: str) -> timedelta:
-    return timedelta(minutes=5 if severity == "CRITICAL" else 10)
+def cooldown_window(alert_or_severity: AlertDecision | str, settings: Settings | None = None) -> timedelta:
+    severity = alert_or_severity.severity if isinstance(alert_or_severity, AlertDecision) else alert_or_severity
+    alert_type = alert_or_severity.alert_type if isinstance(alert_or_severity, AlertDecision) else None
+    configured = settings.alert_cooldown_minutes if settings is not None else {}
+    minutes = None
+    if alert_type is not None:
+        minutes = configured.get(alert_type)
+    if minutes is None:
+        minutes = configured.get(severity)
+    if minutes is None:
+        minutes = 5 if severity == "CRITICAL" else 10
+    return timedelta(minutes=minutes)
 
 
 def build_market_digest(decisions: list[AlertDecision], trigger_count: int) -> AlertDecision | None:
@@ -424,10 +502,17 @@ async def fetch_latest_indicator_snapshots(
                 FROM (
                     SELECT
                         i.*,
-                        mf.btc_return_1m
+                        mf.btc_return_1m,
+                        mf.market_median_return_1m,
+                        CASE
+                            WHEN i.return_1m IS NOT NULL
+                             AND mf.market_median_return_1m IS NOT NULL
+                            THEN i.return_1m - mf.market_median_return_1m
+                            ELSE NULL
+                        END AS market_relative_return_1m
                     FROM indicator_snapshot_1m i
                     LEFT JOIN LATERAL (
-                        SELECT btc_return_1m
+                        SELECT btc_return_1m, market_median_return_1m
                         FROM market_factor_1m
                         WHERE ts <= i.ts
                         ORDER BY ts DESC
@@ -465,8 +550,13 @@ async def process_latest_indicator_alerts(
     )
 
     stored = 0
-    for decision in prioritize_alerts(decisions):
-        await service.persist_and_deliver(session, decision)
+    for index, decision in enumerate(prioritize_alerts(decisions)):
+        suppress_delivery = (
+            settings.alert_mode == "live"
+            and settings.max_live_alerts_per_cycle > 0
+            and index >= settings.max_live_alerts_per_cycle
+        )
+        await service.persist_and_deliver(session, decision, suppress_delivery=suppress_delivery)
         stored += 1
     return stored
 

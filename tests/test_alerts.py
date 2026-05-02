@@ -34,7 +34,9 @@ def test_active_buy_alert_has_required_payload_and_embed_fields() -> None:
             "ts": datetime(2026, 1, 1, tzinfo=UTC),
             "symbol": "SOLUSDT",
             "btc_relative_return_1m": Decimal("0.006"),
+            "market_relative_return_1m": Decimal("0.005"),
             "btc_return_1m": Decimal("0.001"),
+            "market_median_return_1m": Decimal("0.002"),
             "volume_percentile": Decimal("0.995"),
             "volume_robust_z": Decimal("5"),
             "taker_buy_ratio": Decimal("0.8"),
@@ -65,12 +67,21 @@ def test_active_buy_alert_has_required_payload_and_embed_fields() -> None:
         123,
     )
     field_names = {field["name"] for field in payload["embeds"][0]["fields"]}
-    assert {"Symbol", "Direction", "Severity", "Trigger Conditions", "Core Metrics", "Market Context", "Payload ID"} <= field_names
-    market_context = next(field["value"] for field in payload["embeds"][0]["fields"] if field["name"] == "Market Context")
-    core_metrics = next(field["value"] for field in payload["embeds"][0]["fields"] if field["name"] == "Core Metrics")
-    assert "BTC return 1m" in market_context
-    assert "funding rate" in core_metrics
-    assert "funding percentile" in core_metrics
+    assert {
+        "交易对 (symbol)",
+        "方向 (direction)",
+        "级别 (severity)",
+        "触发条件 (conditions)",
+        "核心指标 (metrics)",
+        "市场背景 (context)",
+        "Payload ID",
+    } <= field_names
+    market_context = next(field["value"] for field in payload["embeds"][0]["fields"] if field["name"] == "市场背景 (context)")
+    core_metrics = next(field["value"] for field in payload["embeds"][0]["fields"] if field["name"] == "核心指标 (metrics)")
+    assert "BTC 1m 收益" in market_context
+    assert "资金费率" in core_metrics
+    assert "资金费率分位" in core_metrics
+    assert "p90.0" in core_metrics
     assert alerts[0].payload["funding_percentile"] == "0.9"
 
 
@@ -80,6 +91,7 @@ def test_warmup_indicator_without_baseline_does_not_alert() -> None:
             "ts": datetime(2026, 1, 1, tzinfo=UTC),
             "symbol": "NEWUSDT",
             "btc_relative_return_1m": Decimal("0.10"),
+            "market_relative_return_1m": None,
             "volume_percentile": None,
             "volume_robust_z": None,
             "taker_buy_ratio": Decimal("0.95"),
@@ -107,6 +119,7 @@ def test_cooldown_allows_critical_every_five_minutes() -> None:
     assert service.should_send(decision, now + timedelta(minutes=5, seconds=1))
     assert cooldown_window("CRITICAL") == timedelta(minutes=5)
     assert cooldown_window("WARNING") == timedelta(minutes=10)
+    assert cooldown_window(decision, Settings(alert_cooldown_minutes={"x": 30})) == timedelta(minutes=30)
 
 
 def test_record_cooldown_method_updates_count_1h_contract() -> None:
@@ -222,6 +235,7 @@ def test_flat_oi_buildup_uses_normalized_price_and_oi_moves() -> None:
             "ts": datetime(2026, 1, 1, tzinfo=UTC),
             "symbol": "LINKUSDT",
             "btc_relative_return_1m": Decimal("0"),
+            "market_relative_return_1m": Decimal("0"),
             "volume_percentile": Decimal("0.80"),
             "volume_robust_z": Decimal("1"),
             "taker_buy_ratio": Decimal("0.55"),
@@ -229,13 +243,74 @@ def test_flat_oi_buildup_uses_normalized_price_and_oi_moves() -> None:
             "candle_range_bps": Decimal("20"),
             "oi_robust_z": Decimal("1"),
             "oi_move_norm_15m": Decimal("2.5"),
+            "oi_change_15m": Decimal("0.02"),
             "price_move_norm_15m": Decimal("0.4"),
+            "return_15m": Decimal("0.02"),
+        },
+        Settings(alert_mode="shadow"),
+    )
+    assert alerts == []
+
+
+def test_flat_oi_buildup_requires_p90_volume_and_min_oi_change() -> None:
+    alerts = generate_alerts(
+        {
+            "ts": datetime(2026, 1, 1, tzinfo=UTC),
+            "symbol": "LINKUSDT",
+            "btc_relative_return_1m": Decimal("0"),
+            "market_relative_return_1m": Decimal("0"),
+            "volume_percentile": Decimal("0.95"),
+            "volume_robust_z": Decimal("1"),
+            "taker_buy_ratio": Decimal("0.55"),
+            "candle_body_ratio": Decimal("0.5"),
+            "candle_range_bps": Decimal("20"),
+            "oi_robust_z": Decimal("1"),
+            "oi_move_norm_15m": Decimal("2.5"),
+            "oi_change_15m": Decimal("0.02"),
+            "price_move_norm_15m": Decimal("0.4"),
+            "flat_oi_buildup_score": Decimal("200"),
             "return_15m": Decimal("0.02"),
         },
         Settings(alert_mode="shadow"),
     )
     assert [alert.alert_type for alert in alerts] == ["flat_oi_buildup"]
     assert alerts[0].payload["price_move_norm_15m"] == "0.4"
+    assert alerts[0].payload["oi_change_bps_15m"] == "200.00"
+
+
+def test_alt_directional_alert_requires_btc_and_market_relative() -> None:
+    base = {
+        "ts": datetime(2026, 1, 1, tzinfo=UTC),
+        "symbol": "SOLUSDT",
+        "btc_relative_return_1m": Decimal("0.006"),
+        "volume_percentile": Decimal("0.995"),
+        "volume_robust_z": Decimal("5"),
+        "taker_buy_ratio": Decimal("0.8"),
+        "candle_body_ratio": Decimal("0.8"),
+        "candle_range_bps": Decimal("80"),
+        "oi_robust_z": Decimal("1"),
+    }
+    assert generate_alerts({**base, "market_relative_return_1m": None}, Settings()) == []
+    assert generate_alerts({**base, "market_relative_return_1m": Decimal("0.005")}, Settings())
+
+
+def test_btc_directional_alert_uses_market_relative_path() -> None:
+    alerts = generate_alerts(
+        {
+            "ts": datetime(2026, 1, 1, tzinfo=UTC),
+            "symbol": "BTCUSDT",
+            "btc_relative_return_1m": Decimal("0"),
+            "market_relative_return_1m": Decimal("0.006"),
+            "volume_percentile": Decimal("0.995"),
+            "volume_robust_z": Decimal("5"),
+            "taker_buy_ratio": Decimal("0.8"),
+            "candle_body_ratio": Decimal("0.8"),
+            "candle_range_bps": Decimal("80"),
+            "oi_robust_z": Decimal("1"),
+        },
+        Settings(),
+    )
+    assert [alert.alert_type for alert in alerts] == ["active_buy_impulse"]
 
 
 def test_critical_alerts_are_prioritized_before_warnings() -> None:

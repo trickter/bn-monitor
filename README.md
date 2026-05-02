@@ -25,12 +25,19 @@ bn-monitor poll-once
 bn-monitor config-dump
 bn-monitor compute-indicators
 bn-monitor generate-alerts
+bn-monitor alert-projection --hours 48 --profile balanced
+bn-monitor alert-show 123
 bn-monitor data-quality --lookback-hours 24
 bn-monitor data-quality --lookback-hours 24 --max-staleness-minutes 3
 bn-monitor alert-summary --lookback-hours 24
 bn-monitor alert-summary --symbol SOLUSDT --alert-type active_buy_impulse --severity CRITICAL
 bn-monitor healthcheck
 ```
+
+Set `UNIVERSE_MODE=all_usdt_perpetual` to sync active Binance USD-M `USDT`
+perpetual contracts once at startup. Leave `UNIVERSE_MODE=configured` to keep the
+explicit `SYMBOLS` list. Use `EXCLUDED_SYMBOLS` as a manual blacklist for newly
+listed or noisy contracts.
 
 See [docs/acceptance-checklist.md](docs/acceptance-checklist.md) for the full
 deployment and long-run verification checklist. See

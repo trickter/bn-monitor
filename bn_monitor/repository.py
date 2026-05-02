@@ -81,7 +81,10 @@ async def insert_liquidation_snapshot(session: AsyncSession, row: dict[str, Any]
 
 
 async def upsert_indicator(session: AsyncSession, row: dict[str, Any]) -> None:
-    stmt = insert(models.indicator_snapshot_1m).values(row)
+    table_columns = {column.name for column in models.indicator_snapshot_1m.c}
+    stmt = insert(models.indicator_snapshot_1m).values(
+        {key: value for key, value in row.items() if key in table_columns}
+    )
     update_cols = {
         col.name: getattr(stmt.excluded, col.name)
         for col in models.indicator_snapshot_1m.c

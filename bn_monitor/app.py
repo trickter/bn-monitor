@@ -11,7 +11,13 @@ from bn_monitor.alerts import (
     process_latest_liquidation_confirmations,
 )
 from bn_monitor import repository
-from bn_monitor.binance import BinanceRestClient, BinanceStream, handle_ws_message, poll_rest_forever
+from bn_monitor.binance import (
+    BinanceRestClient,
+    BinanceStream,
+    handle_ws_message,
+    poll_rest_forever,
+    select_universe_symbols,
+)
 from bn_monitor.config import Settings
 from bn_monitor.db import create_engine, create_sessionmaker
 from bn_monitor.discord import DiscordWebhook
@@ -25,16 +31,21 @@ class MonitorApp:
         self.settings = settings
         self.engine = create_engine(settings.database_url)
         self.session_factory = create_sessionmaker(self.engine)
-        self._symbol_set = frozenset(symbol.upper() for symbol in settings.symbols)
+        self.symbols = [symbol.upper() for symbol in settings.symbols]
+        self._symbol_set = frozenset(self.symbols)
 
     async def run(self) -> None:
-        rest = BinanceRestClient(self.settings.binance_rest_url)
+        rest = BinanceRestClient(
+            self.settings.binance_rest_url,
+            min_interval_seconds=1 / self.settings.rest_max_requests_per_second,
+        )
         try:
+            await self.sync_universe_once(rest)
             await asyncio.gather(
                 self.run_ws(),
                 poll_rest_forever(
                     rest,
-                    self.settings.symbols,
+                    self.symbols,
                     self.session_factory,
                     self.settings.rest_poll_interval_seconds,
                     self.settings.kline_backfill_limit,
@@ -45,8 +56,26 @@ class MonitorApp:
             await rest.close()
             await self.engine.dispose()
 
+    async def sync_universe_once(self, rest: BinanceRestClient) -> None:
+        symbols_payload = await rest.exchange_info()
+        async with self.session_factory() as session:
+            async with session.begin():
+                await repository.upsert_symbols(session, symbols_payload)
+        self.symbols = select_universe_symbols(
+            symbols_payload,
+            self.settings.symbols,
+            self.settings.universe_mode,
+            self.settings.excluded_symbols,
+        )
+        self._symbol_set = frozenset(self.symbols)
+        log.info("universe_synced", mode=self.settings.universe_mode, symbols=len(self.symbols))
+
     async def run_ws(self) -> None:
-        stream = BinanceStream(self.settings.binance_ws_url, self.settings.symbols)
+        stream = BinanceStream(
+            self.settings.binance_ws_url,
+            self.symbols,
+            self.settings.ws_kline_stream_chunk_size,
+        )
         pending: dict[str, list[dict[str, Any]]] = {
             "kline": [],
             "mark_price": [],
@@ -76,8 +105,8 @@ class MonitorApp:
                     for row in liqs:
                         await repository.insert_liquidation_snapshot(session, row)
 
-        async def reader() -> None:
-            async for message in stream.messages():
+        async def reader(url: str) -> None:
+            async for message in stream.messages_from_url(url):
                 try:
                     await handle_ws_message(message, collect)
                 except Exception as exc:
@@ -91,7 +120,7 @@ class MonitorApp:
                 except Exception as exc:
                     log.warning("binance_ws_flush_failed", error=str(exc))
 
-        await asyncio.gather(reader(), flusher())
+        await asyncio.gather(*(reader(url) for url in stream.stream_urls()), flusher())
 
     async def run_indicator_loop(self) -> None:
         discord = (
@@ -104,17 +133,23 @@ class MonitorApp:
             else None
         )
         alert_service = AlertService(self.settings, discord)
+        runtime_settings = self.settings.model_copy(update={"symbols": self.symbols})
         try:
             while True:
                 try:
                     async with self.session_factory() as session:
                         async with session.begin():
-                            count = await compute_latest_indicators(session, self.settings.symbols)
+                            count = await compute_latest_indicators(
+                                session,
+                                self.symbols,
+                                self.settings.market_data_max_staleness_minutes,
+                                self.settings.normalized_move_min_mad_bps,
+                            )
                             alert_count = await process_latest_indicator_alerts(
-                                session, self.settings, alert_service
+                                session, runtime_settings, alert_service
                             )
                             alert_count += await process_latest_liquidation_confirmations(
-                                session, self.settings, alert_service
+                                session, runtime_settings, alert_service
                             )
                             if count:
                                 log.info("indicators_computed", count=count, alerts=alert_count)

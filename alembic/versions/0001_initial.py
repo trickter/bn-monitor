@@ -20,6 +20,7 @@ def upgrade() -> None:
         sa.Column("symbol", sa.Text(), nullable=False),
         sa.Column("base_asset", sa.Text(), nullable=False),
         sa.Column("quote_asset", sa.Text(), nullable=False),
+        sa.Column("contract_type", sa.Text()),
         sa.Column("status", sa.Text(), nullable=False),
         sa.Column("tick_size", sa.Numeric(38, 18)),
         sa.Column("step_size", sa.Numeric(38, 18)),

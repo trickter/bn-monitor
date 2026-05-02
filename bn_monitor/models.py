@@ -25,6 +25,7 @@ symbols = Table(
     Column("symbol", Text, primary_key=True),
     Column("base_asset", Text, nullable=False),
     Column("quote_asset", Text, nullable=False),
+    Column("contract_type", Text),
     Column("status", Text, nullable=False),
     Column("tick_size", Numeric(38, 18)),
     Column("step_size", Numeric(38, 18)),

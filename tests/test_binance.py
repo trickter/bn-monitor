@@ -5,7 +5,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from bn_monitor.binance import BinanceRestClient
+from bn_monitor.binance import BinanceRestClient, BinanceStream, select_universe_symbols
 from bn_monitor.binance import closed_kline_from_ws, liquidation_from_ws
 
 
@@ -130,6 +130,7 @@ async def test_exchange_info_maps_symbol_filters() -> None:
                         "symbol": "BTCUSDT",
                         "baseAsset": "BTC",
                         "quoteAsset": "USDT",
+                        "contractType": "PERPETUAL",
                         "status": "TRADING",
                         "filters": [
                             {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
@@ -153,9 +154,85 @@ async def test_exchange_info_maps_symbol_filters() -> None:
         await client.close()
 
     assert rows[0]["symbol"] == "BTCUSDT"
+    assert rows[0]["contract_type"] == "PERPETUAL"
     assert rows[0]["tick_size"] == Decimal("0.10")
     assert rows[0]["step_size"] == Decimal("0.001")
     assert rows[0]["min_notional"] == Decimal("5")
+
+
+@pytest.mark.asyncio
+async def test_exchange_info_filters_to_trading_usdt_perpetuals() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "symbols": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "baseAsset": "BTC",
+                        "quoteAsset": "USDT",
+                        "contractType": "PERPETUAL",
+                        "status": "TRADING",
+                        "filters": [],
+                    },
+                    {
+                        "symbol": "BTCUSDC",
+                        "baseAsset": "BTC",
+                        "quoteAsset": "USDC",
+                        "contractType": "PERPETUAL",
+                        "status": "TRADING",
+                        "filters": [],
+                    },
+                    {
+                        "symbol": "ETHUSDT_260626",
+                        "baseAsset": "ETH",
+                        "quoteAsset": "USDT",
+                        "contractType": "CURRENT_QUARTER",
+                        "status": "TRADING",
+                        "filters": [],
+                    },
+                    {
+                        "symbol": "OLDUSDT",
+                        "baseAsset": "OLD",
+                        "quoteAsset": "USDT",
+                        "contractType": "PERPETUAL",
+                        "status": "BREAK",
+                        "filters": [],
+                    },
+                ]
+            },
+            request=request,
+        )
+
+    client = BinanceRestClient(
+        "https://example.test",
+        httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://example.test"),
+        min_interval_seconds=0,
+    )
+    try:
+        rows = await client.exchange_info()
+    finally:
+        await client.close()
+
+    assert [row["symbol"] for row in rows] == ["BTCUSDT"]
+
+
+def test_ws_streams_use_market_route_and_chunk_klines() -> None:
+    stream = BinanceStream("wss://fstream.binance.com", ["BTCUSDT", "ETHUSDT", "SOLUSDT"], 2)
+    urls = stream.stream_urls()
+    assert len(urls) == 3
+    assert urls[0] == "wss://fstream.binance.com/market/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m"
+    assert urls[1] == "wss://fstream.binance.com/market/stream?streams=solusdt@kline_1m"
+    assert urls[2] == "wss://fstream.binance.com/market/stream?streams=!markPrice@arr@1s/!forceOrder@arr"
+
+
+def test_select_universe_symbols_respects_mode_and_exclusions() -> None:
+    rows = [
+        {"symbol": "BTCUSDT", "is_active": True},
+        {"symbol": "ETHUSDT", "is_active": True},
+    ]
+    assert select_universe_symbols(rows, ["SOLUSDT"], "configured", ["SOLUSDT"]) == []
+    assert select_universe_symbols(rows, ["SOLUSDT"], "all_usdt_perpetual", ["ETHUSDT"]) == ["BTCUSDT"]
 
 
 @pytest.mark.asyncio

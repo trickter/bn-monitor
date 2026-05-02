@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -91,20 +92,20 @@ async def _respect_success_rate_limit(response: httpx.Response) -> None:
 def discord_payload(alert: dict[str, Any], alert_id: int | None) -> dict[str, Any]:
     payload = alert.get("payload", {})
     fields = [
-        {"name": "Symbol", "value": alert["symbol"], "inline": True},
-        {"name": "Direction", "value": alert["direction"], "inline": True},
-        {"name": "Severity", "value": alert["severity"], "inline": True},
-        {"name": "Trigger Conditions", "value": ", ".join(payload.get("trigger_conditions", [])) or "n/a"},
-        {"name": "Core Metrics", "value": _metrics(payload)},
-        {"name": "Market Context", "value": _market_context(payload)},
-        {"name": "Payload ID", "value": str(alert_id or "pending"), "inline": True},
+        {"name": "交易对 (symbol)", "value": alert["symbol"], "inline": True},
+        {"name": "方向 (direction)", "value": alert["direction"], "inline": True},
+        {"name": "级别 (severity)", "value": alert["severity"], "inline": True},
+        {"name": "触发条件 (conditions)", "value": ", ".join(payload.get("trigger_conditions", [])) or "n/a"},
+        {"name": "核心指标 (metrics)", "value": _metrics(payload)},
+        {"name": "市场背景 (context)", "value": _market_context(payload)},
+        {"name": "Payload ID", "value": _payload_id_text(alert_id), "inline": False},
     ]
     return {
         "embeds": [
             {
-                "title": alert["title"],
+                "title": _title(alert),
                 "description": alert["message"],
-                "color": _color(alert["severity"]),
+                "color": _color(alert["severity"], alert.get("alert_type")),
                 "fields": fields,
                 "timestamp": alert["ts"].isoformat() if hasattr(alert["ts"], "isoformat") else None,
             }
@@ -115,13 +116,14 @@ def discord_payload(alert: dict[str, Any], alert_id: int | None) -> dict[str, An
 def _metrics(payload: dict[str, Any]) -> str:
     return "\n".join(
         [
-            f"volume percentile: {payload.get('volume_percentile', 'n/a')}",
-            f"volume robust z: {payload.get('volume_robust_z', 'n/a')}",
-            f"taker buy ratio: {payload.get('taker_buy_ratio', 'n/a')}",
-            f"OI robust z: {payload.get('oi_robust_z', 'n/a')}",
-            f"OI move norm 15m: {payload.get('oi_move_norm_15m', 'n/a')}",
-            f"funding rate: {payload.get('funding_rate', 'n/a')}",
-            f"funding percentile: {payload.get('funding_percentile', 'n/a')}",
+            f"成交量分位 (volume_pct): {_format_percentile(payload.get('volume_percentile'))}",
+            f"成交量 robust z (volume_z): {_format_decimal(payload.get('volume_robust_z'))}",
+            f"主动买入比 (taker_buy): {format_pct(payload.get('taker_buy_ratio'))}",
+            f"OI robust z (oi_z): {_format_decimal(payload.get('oi_robust_z'))}",
+            f"OI 15m 标准化 (oi_norm): {_format_decimal(payload.get('oi_move_norm_15m'))}",
+            f"OI 15m 变化 (oi_bps): {format_bps(payload.get('oi_change_15m'))}",
+            f"资金费率 (funding): {format_funding_rate(payload.get('funding_rate'))}",
+            f"资金费率分位 (funding_pct): {_format_percentile(payload.get('funding_percentile'))}",
         ]
     )
 
@@ -129,11 +131,92 @@ def _metrics(payload: dict[str, Any]) -> str:
 def _market_context(payload: dict[str, Any]) -> str:
     return "\n".join(
         [
-            f"BTC return 1m: {payload.get('btc_return_1m', 'n/a')}",
-            f"BTC-relative return: {payload.get('btc_relative_return_1m', 'n/a')}",
+            f"BTC 1m 收益 (btc_ret): {format_pct(payload.get('btc_return_1m'))}",
+            f"BTC 相对收益 (btc_rel): {format_pct(payload.get('btc_relative_return_1m'))}",
+            f"市场中位收益 (market_median): {format_pct(payload.get('market_median_return_1m'))}",
+            f"市场相对收益 (market_rel): {format_pct(payload.get('market_relative_return_1m'))}",
         ]
     )
 
 
-def _color(severity: str) -> int:
+def _color(severity: str, alert_type: str | None = None) -> int:
+    type_colors = {
+        "flat_oi_buildup": 0x8B949E,
+        "active_buy_impulse": 0x2EA043,
+        "buy_absorption": 0x2EA043,
+        "active_sell_impulse": 0xD73A49,
+        "sell_absorption": 0xD73A49,
+        "liquidation_snapshot_confirmation": 0x8957E5,
+        "market_digest": 0xDBAB09,
+        "symbol_alert_bundle": 0x58A6FF,
+    }
+    if alert_type in type_colors:
+        return type_colors[alert_type]
     return 0xD73A49 if severity == "CRITICAL" else 0xDBAB09
+
+
+def _title(alert: dict[str, Any]) -> str:
+    title_by_type = {
+        "flat_oi_buildup": "横盘增仓",
+        "active_buy_impulse": "主动买入冲击",
+        "active_sell_impulse": "主动卖出冲击",
+        "buy_absorption": "买盘吸收",
+        "sell_absorption": "卖盘吸收",
+        "liquidation_snapshot_confirmation": "强平快照确认",
+        "market_digest": "市场共振摘要",
+        "symbol_alert_bundle": "多信号合并",
+    }
+    alert_type = alert.get("alert_type")
+    prefix = title_by_type.get(alert_type)
+    if prefix:
+        return f"{alert['symbol']} {prefix}"
+    return alert["title"]
+
+
+def _payload_id_text(alert_id: int | None) -> str:
+    if alert_id is None:
+        return "pending"
+    return f"{alert_id} (`bn-monitor alert-show {alert_id}`)"
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _format_decimal(value: Any, places: int = 2) -> str:
+    decimal = _to_decimal(value)
+    if decimal is None:
+        return "n/a"
+    return f"{decimal:.{places}f}"
+
+
+def format_pct(value: Any, places: int = 2) -> str:
+    decimal = _to_decimal(value)
+    if decimal is None:
+        return "n/a"
+    sign = "+" if decimal > 0 else ""
+    return f"{sign}{decimal * Decimal('100'):.{places}f}%"
+
+
+def format_bps(value: Any, places: int = 1) -> str:
+    decimal = _to_decimal(value)
+    if decimal is None:
+        return "n/a"
+    sign = "+" if decimal > 0 else ""
+    return f"{sign}{decimal * Decimal('10000'):.{places}f} bps"
+
+
+def format_funding_rate(value: Any) -> str:
+    return format_pct(value, places=4)
+
+
+def _format_percentile(value: Any, places: int = 1) -> str:
+    decimal = _to_decimal(value)
+    if decimal is None:
+        return "n/a"
+    return f"p{decimal * Decimal('100'):.{places}f}"
