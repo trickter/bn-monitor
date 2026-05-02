@@ -139,12 +139,12 @@ OI history 接口是 5m 粒度，适合作为大 universe 下的低成本压力�
 
 - 普通 alt：`abs(btc_relative_bps) < SMALL_MOVE_THRESHOLD_BPS` 且 `abs(market_relative_bps) < SMALL_MOVE_THRESHOLD_BPS`
 - BTC/ETH：`abs(market_relative_bps) < SMALL_MOVE_THRESHOLD_BPS`
-- volume 异常
+- absorption 专用 volume 条件：`volume_percentile >= ABSORPTION_VOLUME_PERCENTILE_THRESHOLD` 且 `volume_robust_z >= ABSORPTION_VOLUME_ROBUST_Z_THRESHOLD`
 - `candle_body_ratio <= 0.35`
 - `candle_range_bps <= 200`
 - `taker_buy_ratio >= 0.75`
 
-严重度固定为 `WARNING`。
+严重度固定为 `WARNING`。默认 per-type 冷却为 60 分钟，避免横盘阶段同类吸收信号反复推送。
 
 含义：大量主动买入没有推动价格明显上涨，可能有被动卖压吸收。
 
@@ -238,7 +238,7 @@ CRITICAL escalation 不会被同 type 冷却挡住：若已有同 signal 的非 
 可通过 `ALERT_COOLDOWN_MINUTES` JSON 覆盖，例如：
 
 ```env
-ALERT_COOLDOWN_MINUTES={"CRITICAL":5,"WARNING":10,"flat_oi_buildup":60}
+ALERT_COOLDOWN_MINUTES={"CRITICAL":5,"WARNING":10,"buy_absorption":60,"sell_absorption":60,"flat_oi_buildup":60}
 ```
 
 冷却使用双层缓存：进程内 dict + 持久化 `alert_cooldowns` 表，重启不丢。`count_1h` 记录 1 小时内滚动次数，可用于后续更复杂的频率衰减。
@@ -299,6 +299,8 @@ Embed 已中文化并保留英文小字段，便于回查代码：
 | `SMALL_MOVE_THRESHOLD_BPS` | 10 | absorption 的小幅波动阈值 |
 | `VOLUME_PERCENTILE_THRESHOLD` | 0.99 | 量能异常 percentile |
 | `VOLUME_ROBUST_Z_THRESHOLD` | 4 | 量能异常 robust z 备选 |
+| `ABSORPTION_VOLUME_PERCENTILE_THRESHOLD` | 0.99 | absorption 专用成交量分位阈值 |
+| `ABSORPTION_VOLUME_ROBUST_Z_THRESHOLD` | 6 | absorption 专用 robust z 阈值 |
 | `OI_BUILDUP_THRESHOLD` | 2 | OI z 或归一化 OI move 阈值 |
 | `PRICE_FLAT_NORM_THRESHOLD` | 0.5 | flat OI 的价格横盘阈值 |
 | `FLAT_OI_VOLUME_PERCENTILE_THRESHOLD` | 0.90 | flat OI 的成交量分位阈值 |

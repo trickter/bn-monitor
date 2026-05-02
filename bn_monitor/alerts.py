@@ -85,6 +85,10 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
         vol_pct >= Decimal(str(settings.volume_percentile_threshold))
         or vol_z >= Decimal(str(settings.volume_robust_z_threshold))
     )
+    absorption_volume_ok = (
+        vol_pct >= Decimal(str(settings.absorption_volume_percentile_threshold))
+        and vol_z >= Decimal(str(settings.absorption_volume_robust_z_threshold))
+    )
     alerts: list[AlertDecision] = []
     common_payload = {
         "symbol": indicator["symbol"],
@@ -145,7 +149,7 @@ def generate_alerts(indicator: dict[str, Any], settings: Settings) -> list[Alert
         and abs(btc_rel_bps) < small_move
         and abs(market_rel_bps) < small_move
     )
-    if small_relative_move and volume_ok and body <= Decimal("0.35") and range_not_extreme:
+    if small_relative_move and absorption_volume_ok and body <= Decimal("0.35") and range_not_extreme:
         if buy_ratio >= Decimal("0.75"):
             payload = {**common_payload, "trigger_conditions": ["active buy", "small close move", "small body"]}
             alerts.append(AlertDecision(

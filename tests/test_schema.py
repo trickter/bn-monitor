@@ -138,6 +138,8 @@ def test_config_dump_redacts_secrets_and_exposes_thresholds() -> None:
     assert payload["discord_webhook_configured"] is True
     assert "discord.example" not in str(payload)
     assert payload["thresholds"]["price_threshold_bps"] == 35
+    assert payload["thresholds"]["absorption_volume_percentile_threshold"] == 0.99
+    assert payload["thresholds"]["absorption_volume_robust_z_threshold"] == 6
     assert payload["thresholds"]["flat_oi_volume_percentile_threshold"] == 0.9
     assert payload["thresholds"]["data_retention_days"] == 30
     assert payload["intervals"]["rest_max_requests_per_second"] == 15
@@ -219,6 +221,8 @@ def test_env_example_covers_runtime_settings() -> None:
         "OPEN_INTEREST_POLL_INTERVAL_SECONDS",
         "WS_KLINE_STREAM_CHUNK_SIZE",
         "FLAT_OI_VOLUME_PERCENTILE_THRESHOLD",
+        "ABSORPTION_VOLUME_PERCENTILE_THRESHOLD",
+        "ABSORPTION_VOLUME_ROBUST_Z_THRESHOLD",
         "FLAT_OI_MIN_OI_CHANGE_BPS",
         "NORMALIZED_MOVE_MIN_MAD_BPS",
         "MAX_LIVE_ALERTS_PER_CYCLE",

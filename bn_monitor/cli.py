@@ -445,6 +445,8 @@ def _config_payload(settings) -> dict[str, object]:
             "small_move_threshold_bps": settings.small_move_threshold_bps,
             "volume_percentile_threshold": settings.volume_percentile_threshold,
             "volume_robust_z_threshold": settings.volume_robust_z_threshold,
+            "absorption_volume_percentile_threshold": settings.absorption_volume_percentile_threshold,
+            "absorption_volume_robust_z_threshold": settings.absorption_volume_robust_z_threshold,
             "oi_buildup_threshold": settings.oi_buildup_threshold,
             "price_flat_norm_threshold": settings.price_flat_norm_threshold,
             "flat_oi_volume_percentile_threshold": settings.flat_oi_volume_percentile_threshold,

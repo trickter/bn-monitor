@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     small_move_threshold_bps: float = 10
     volume_percentile_threshold: float = 0.99
     volume_robust_z_threshold: float = 4
+    absorption_volume_percentile_threshold: float = 0.99
+    absorption_volume_robust_z_threshold: float = 6
     oi_buildup_threshold: float = 2
     price_flat_norm_threshold: float = 0.5
     flat_oi_volume_percentile_threshold: float = 0.90
@@ -51,6 +53,8 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "CRITICAL": 5,
             "WARNING": 10,
+            "buy_absorption": 60,
+            "sell_absorption": 60,
             "flat_oi_buildup": 60,
         }
     )

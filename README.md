@@ -75,6 +75,8 @@ polling cadence within Binance's endpoint limits for a large universe.
   to cross the configured threshold.
 - BTC/ETH alerts use market-relative returns directly because BTC-relative for BTC is
   always zero.
+- `buy_absorption` / `sell_absorption` use stricter volume confirmation than impulse
+  alerts: p99 volume and robust z>=6 must both pass, with a 60m per-type cooldown.
 - `flat_oi_buildup` requires normalized OI buildup, a minimum 15m OI bps move,
   flat normalized price movement, and p90+ volume.
 - Live mode bundles same-symbol multi-signals, emits market digests for broad

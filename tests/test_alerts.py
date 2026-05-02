@@ -110,6 +110,54 @@ def test_warmup_indicator_without_baseline_does_not_alert() -> None:
     assert alerts == []
 
 
+def test_sideways_absorption_requires_percentile_and_robust_z_confirmation() -> None:
+    alerts = generate_alerts(
+        {
+            "ts": datetime(2026, 1, 1, tzinfo=UTC),
+            "symbol": "AVAXUSDT",
+            "btc_relative_return_1m": Decimal("0.000001"),
+            "market_relative_return_1m": Decimal("0"),
+            "btc_return_1m": Decimal("0.0001"),
+            "market_median_return_1m": Decimal("0.0001"),
+            "volume_percentile": Decimal("0.928"),
+            "volume_robust_z": Decimal("6.15"),
+            "taker_buy_ratio": Decimal("0.017"),
+            "candle_body_ratio": Decimal("0.1"),
+            "candle_range_bps": Decimal("20"),
+            "oi_robust_z": Decimal("-0.24"),
+            "oi_change_15m": Decimal("0.0002"),
+            "oi_move_norm_15m": Decimal("0.43"),
+            "price_move_norm_15m": Decimal("0.2"),
+            "funding_rate": Decimal("-0.000056"),
+            "funding_percentile": Decimal("0.996"),
+        },
+        Settings(alert_mode="live"),
+    )
+    assert alerts == []
+
+
+def test_absorption_triggers_only_after_strict_volume_confirmation() -> None:
+    alerts = generate_alerts(
+        {
+            "ts": datetime(2026, 1, 1, tzinfo=UTC),
+            "symbol": "AVAXUSDT",
+            "btc_relative_return_1m": Decimal("0.000001"),
+            "market_relative_return_1m": Decimal("0"),
+            "volume_percentile": Decimal("0.995"),
+            "volume_robust_z": Decimal("6.5"),
+            "taker_buy_ratio": Decimal("0.05"),
+            "candle_body_ratio": Decimal("0.1"),
+            "candle_range_bps": Decimal("20"),
+            "oi_robust_z": Decimal("0"),
+            "oi_change_15m": Decimal("0"),
+            "oi_move_norm_15m": Decimal("0"),
+            "price_move_norm_15m": Decimal("0.2"),
+        },
+        Settings(alert_mode="live"),
+    )
+    assert [alert.alert_type for alert in alerts] == ["sell_absorption"]
+
+
 def test_cooldown_allows_critical_every_five_minutes() -> None:
     service = AlertService(Settings(alert_mode="live"))
     decision = AlertDecision("x", "CRITICAL", "up", Decimal("1"), "title", "message", {"symbol": "BTCUSDT"})
@@ -120,6 +168,18 @@ def test_cooldown_allows_critical_every_five_minutes() -> None:
     assert cooldown_window("CRITICAL") == timedelta(minutes=5)
     assert cooldown_window("WARNING") == timedelta(minutes=10)
     assert cooldown_window(decision, Settings(alert_cooldown_minutes={"x": 30})) == timedelta(minutes=30)
+    assert cooldown_window(
+        AlertDecision(
+            "sell_absorption",
+            "WARNING",
+            "neutral",
+            Decimal("1"),
+            "title",
+            "message",
+            {"symbol": "AVAXUSDT"},
+        ),
+        Settings(),
+    ) == timedelta(minutes=60)
 
 
 def test_record_cooldown_method_updates_count_1h_contract() -> None:
